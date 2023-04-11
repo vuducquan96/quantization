@@ -9,17 +9,16 @@ import random
 import numpy as np
 from tqdm import tqdm
 from pathlib import Path
-from numba import int64, jit
-from termcolor import colored
-# import spconv
+
 from pdb import set_trace as bp
 from collections import defaultdict
 from configs.system_config import *
+from spconv.pytorch.utils import PointToVoxel
 from core.ops.iou3d_nms import iou3d_nms_utils
 from core.datalibs.box_utils import boxes_to_corners_3d
 from core.datalibs.augmentor.data_augmentor import DataAugmentor
 from core.visualize_lib import debug_draw, add_show_future_position
-
+from core.datalibs.processor.point_feature_encoder import PointFeatureEncoder
 
 def sample_convert_to_torch(example, dtype, device=None) -> dict:
 
@@ -30,7 +29,7 @@ def sample_convert_to_torch(example, dtype, device=None) -> dict:
     example_torch = {}
 
     float_names = [
-        "voxels", "anchors", "reg_targets", "importance", "iou_mask", "fix_size_points", "points", "voxel"
+        "voxels", "anchors", "reg_targets", "importance", "iou_mask", "fix_size_points", "points", "voxel", "sparse_voxels"
     ]
     batch_size = example["batch_size"]
 
@@ -103,7 +102,6 @@ def get_num(in_str):
 
 def get_max_id(reduce_list):
     max_id = 0
-
     for check_path in reduce_list:
         name = check_path.split("/")[-1]
         frame_id = int(name.replace(".bin",""))
@@ -111,7 +109,6 @@ def get_max_id(reduce_list):
             max_id = frame_id
 
     return max_id
-
 def filter_list_with_minid(reduce_list, min_id, pre_obs):
     filtered_list = []
     counter = 0
@@ -210,15 +207,10 @@ def batch_merge(batch_list):
     ret["batch_size"] = len(batch_list)
     
     for key, elems in example_merged.items():
-
-        if key in [
-            'voxels', 'num_points'
-        ]:
-            try:
-                ret[key] = np.concatenate(elems, axis=0)
-            except:
-                ret[key] = elems
-
+        if key in ['num_points']:
+            ret[key] = np.concatenate(elems, axis=0)
+        elif key in ['voxels', "sparse_voxels"]:
+            ret[key] = torch.cat(elems, axis=0)
         elif key == 'coordinates':
             coors = []
             for i, coor in enumerate(elems):
@@ -233,7 +225,7 @@ def batch_merge(batch_list):
                     coor, ((0, 0), (1, 0)), mode='constant', constant_values=i)
                 coors.append(coor_pad)
             ret[key] = np.concatenate(coors, axis=0)
-        elif not (key in ['show_points', '2d_previous_voxel', 'previous_num_point', 'previous_voxel', 'previous_coor', 'points', 'gt_names', 'gt_class', 'gt_bbox', 'gt_boxes', "future_position"]):
+        elif not (key in ['list_mask', 'show_points', '2d_previous_voxel', 'previous_num_point', 'previous_voxel', 'previous_coor', 'points', 'gt_names', 'gt_class', 'gt_bbox', 'gt_boxes', "future_position"]):
             ret[key] = np.stack(elems, axis=0)
         else:
             ret[key] = elems
@@ -282,35 +274,6 @@ def point_filter_range(points, detection_range, delta = 1e-4):
     points = points[idx]
 
     return points
-
-def merge_point_list(past_point_list, voxelization):
-
-    list_previous_point = {}
-    voxel_list = []
-    coor_list = []
-    num_point_list = []
-    counter_previous_point = 0
-    for raw_point in past_point_list:
-        l_point = raw_point[:,:3]
-        l_voxel_output = voxelization.generate(l_point)
-
-        if isinstance(l_voxel_output, dict):
-            l_voxels, l_coordinates, l_num_points_per_voxel = \
-                l_voxel_output['voxels'], l_voxel_output['coordinates'], l_voxel_output['num_points_per_voxel']
-        else:
-            l_voxels, l_coordinates, l_num_points_per_voxel = l_voxel_output
-        the_shape = np.zeros((l_coordinates.shape[0], 4))
-        the_shape[:,1:] = l_coordinates
-        the_shape[:,0] = counter_previous_point
-        counter_previous_point += 1
-        coor_list.append(the_shape)
-        voxel_list.append(l_voxels)
-        num_point_list.append(l_num_points_per_voxel)
-    previous_voxel = np.concatenate(voxel_list, axis=0)
-    previous_coor = np.concatenate(coor_list, axis=0)
-    previous_num_point = np.concatenate(num_point_list, axis=0)
-
-    return previous_voxel, previous_coor, previous_num_point
 
 def auto_detect_ground(points, gt_bbox):
 
@@ -442,6 +405,21 @@ class lidar_dataset(torch.utils.data.Dataset):
             point_cloud_range=np.array(self.detection_range, dtype=np.float32)
         )
 
+        # bp()
+        self.sparse_gen = PointToVoxel(
+            vsize_xyz=self.config.VOXEL_GENERATOR.VOXEL_SIZE,
+            coors_range_xyz=self.config.VOXEL_GENERATOR.RANGE,
+            num_point_features=3,
+            max_num_voxels=self.config.VOXEL_GENERATOR.MAX_VOXELS,
+            max_num_points_per_voxel=self.config.VOXEL_GENERATOR.MAX_NUMBER_OF_POINTS_PER_VOXEL)
+        # bp()
+        # self.sparse_gen = PointToVoxel(
+        #     vsize_xyz=[0.4, 0.4, 6],
+        #     coors_range_xyz=[-80, -80, -2, 80, 80, 4],
+        #     num_point_features=3,
+        #     max_num_voxels=15000,
+        #     max_num_points_per_voxel=200)
+
         if config.DATA_AUGMENTOR.IS_USED == True:
             self.data_augmentor = DataAugmentor(
                 root_path=Path(config.DATA_AUGMENTOR.ROOT_PATH),
@@ -463,7 +441,8 @@ class lidar_dataset(torch.utils.data.Dataset):
 
         self.FIX_POINT_SAMPLING = config.FIX_POINT_SAMPLING
 
-        self.voxel_size =  [0.1, 0.1, 0.15]
+        self.voxel_size =  [0.2, 0.2, 0.2]
+
         self.out_size_factor = config["out_size_factor"]
         if self.anchor_box_function != None:
             self.feature_map_size = voxel_generator.grid_size[:2] // out_size_factor
@@ -486,6 +465,7 @@ class lidar_dataset(torch.utils.data.Dataset):
             self.voxelization = None
 
         list_for_testing = []
+        self.used_iou_mask = False
         temp = []
         print(">>>>> Start loading label")
 
@@ -511,63 +491,31 @@ class lidar_dataset(torch.utils.data.Dataset):
         :param point_cloud: continuous point cloud | dim_0: all points, dim_1: [x, y, z, reflection]
         :return: voxelized point cloud | shape: [INPUT_DIM_0, INPUT_DIM_1, INPUT_DIM_2]
         """
-        VOX_Y_MIN = self.detection_range[1]
-        VOX_Y_MAX = self.detection_range[4]
+        dim_x = int((self.detection_range[3] - self.detection_range[0]) / self.voxel_size[0])
+        dim_y = int((self.detection_range[4] - self.detection_range[1]) / self.voxel_size[1])
+        dim_z = int((self.detection_range[5] - self.detection_range[2]) / self.voxel_size[2])
 
-        VOX_X_MIN = self.detection_range[0]
-        VOX_X_MAX = self.detection_range[3]
+        points = torch.from_numpy(point_cloud)
+        cell_inds = torch.zeros((len(points), 3), dtype=torch.long)
+        cell_inds[:, 1] = ((points[:, 1] - self.detection_range[1]) /
+                           self.voxel_size[1]).long()
+        cell_inds[:, 0] = ((points[:, 0] - self.detection_range[0]) /
+                           self.voxel_size[0]).long()
+        cell_inds[:, 2] = ((points[:, 2] - self.detection_range[2]) /
+                           self.voxel_size[2]).long()
 
-        VOX_Z_MIN = self.detection_range[2]
-        VOX_Z_MAX = self.detection_range[5]
+        valid = torch.logical_and(torch.logical_and(
+            torch.logical_and(cell_inds[:, 0] > -1, cell_inds[:, 0] < dim_x),
+            torch.logical_and(cell_inds[:, 1] > -1, cell_inds[:, 1] < dim_y)),
+            torch.logical_and(cell_inds[:, 2] > -1, cell_inds[:, 2] < dim_z))
 
-        # transformation from m to voxels
-        VOX_X_DIVISION = self.voxel_size[0]
-        VOX_Y_DIVISION = self.voxel_size[1]
-        VOX_Z_DIVISION = self.voxel_size[2]
-        #bp()
+        valid_cell_inds = cell_inds[valid]
 
-        # dimensionality of network input (voxelized point cloud)
-        INPUT_DIM_0 = int((VOX_X_MAX-VOX_X_MIN) // VOX_X_DIVISION) + 1
-        INPUT_DIM_1 = int((VOX_Y_MAX-VOX_Y_MIN) // VOX_Y_DIVISION) + 1
-        # + 1 for average reflectance value of the points in the respective voxel
-        INPUT_DIM_2 = int((VOX_Z_MAX-VOX_Z_MIN) // VOX_Z_DIVISION) + 1 + 1
-        # remove all points outside the pre-specified FOV
-        idx = np.where(point_cloud[:, 0] > VOX_X_MIN)
-        point_cloud = point_cloud[idx]
-        idx = np.where(point_cloud[:, 0] < VOX_X_MAX)
-        point_cloud = point_cloud[idx]
-        idx = np.where(point_cloud[:, 1] > VOX_Y_MIN)
-        point_cloud = point_cloud[idx]
-        idx = np.where(point_cloud[:, 1] < VOX_Y_MAX)
-        point_cloud = point_cloud[idx]
-        idx = np.where(point_cloud[:, 2] > VOX_Z_MIN)
-        point_cloud = point_cloud[idx]
-        idx = np.where(point_cloud[:, 2] < VOX_Z_MAX)
-        point_cloud = point_cloud[idx]
-
-        # create separate vectors for x, y, z coordinates and the reflectance value
-        pxs = point_cloud[:, 0]
-        pys = point_cloud[:, 1]
-        pzs = point_cloud[:, 2]
-
-        # convert velodyne coordinates to voxel
-        qxs = ((pxs - VOX_X_MIN) // VOX_X_DIVISION).astype(np.int32)
-        qys = ((pys - VOX_Y_MIN) // VOX_Y_DIVISION).astype(np.int32)
-        qzs = ((pzs - VOX_Z_MIN) // VOX_Z_DIVISION).astype(np.int32)
-        quantized = np.dstack((qxs, qys, qzs)).squeeze()
-
-        # create empty voxel grid and reflectance image
-        voxel_grid = np.zeros(shape=(INPUT_DIM_1, INPUT_DIM_0, INPUT_DIM_2-1), dtype=np.float32)
-        reflectance_image = np.zeros(shape=(INPUT_DIM_0, INPUT_DIM_1), dtype=np.float32)
-        reflectance_count = np.zeros(shape=(INPUT_DIM_0, INPUT_DIM_1), dtype=np.float32)
-
-        for point_id, point in enumerate(quantized):
-            point = point.astype(np.int32)
-            voxel_grid[point[1], point[0], point[2]] = 1
-
-        voxel_output = voxel_grid
-
-        return voxel_output
+        voxel = torch.zeros((dim_x, dim_y, dim_z), dtype=torch.float)
+        voxel[valid_cell_inds[:, 1], valid_cell_inds[:, 0],
+        valid_cell_inds[:, 2]] = 1
+        voxel = voxel.permute(2, 0, 1).unsqueeze(0)
+        return voxel
 
     def small_part(self, all_lidar_bin, numbs, id):
         all_lidar_bin = sorted(all_lidar_bin)
@@ -739,7 +687,6 @@ class lidar_dataset(torch.utils.data.Dataset):
 
             f_center_position_gt = np.ones((f_gt_bbox.shape[0], 4))
 
-            #print("Debug 1:", "f_center_position_gt.shape ", f_gt_bbox.shape)
             try:
                 f_center_position_gt[:,:3] = f_gt_bbox[:,:3]
             except:
@@ -806,7 +753,7 @@ class lidar_dataset(torch.utils.data.Dataset):
         point_path = self.gt_point_segmentation_path[index]
 
         #if ("scaleai" in lidar_path.lower()) or ("hesai64" in lidar_path.lower()) or ("hesai40" in lidar_path.lower()) or ("vld" in lidar_path.lower()):
-        if ("scaleai" in lidar_path.lower()) or ("hesai64" in lidar_path.lower()) or ("hesai40" in lidar_path.lower()):
+        if ("aimmo" in lidar_path.lower()) or ("scaleai" in lidar_path.lower()) or ("hesai64" in lidar_path.lower()) or ("hesai40" in lidar_path.lower()):
             plus_z = 2.0
 
         if self.config.USING_MULTI_FRAME.IS_USED == True:
@@ -832,12 +779,7 @@ class lidar_dataset(torch.utils.data.Dataset):
 
         gt_bbox, gt_name, _, gt_importance, gt_id, keep_point_list, ignore_point_list, matrix_A  = self.read_gt_bbox(label_path, point_path, global_x, global_y, plus_z)
 
-        if self.config.USING_MULTI_FRAME.IS_USED == True:
-            future_position = self.get_position(label_path, gt_bbox, gt_id, matrix_A, global_x, global_y, plus_z)
-            if future_position is None:
-                return None
         points = np.delete(points, ignore_point_list, axis=0)
-        #points = points[keep_point_list]
 
         points = point_filter_range(points, self.detection_range)
 
@@ -852,10 +794,9 @@ class lidar_dataset(torch.utils.data.Dataset):
         if ("train" in self.mode.lower()) or (self.config.NO_FILTER_GROUND_TRUTH == True):
             gt_bbox, gt_name, gt_importance, gt_id = self.out_of_range_filter(gt_bbox, gt_name, gt_importance, gt_id)
 
-
+        # bp()
         if self.data_augmentor is not None:
             if (gt_bbox.shape[0] != 0) and ("train" in self.mode.lower()):
-            
                 data_dict = {}
                 data_dict["gt_boxes"] = gt_bbox
                 data_dict["gt_names"] = gt_name
@@ -882,30 +823,15 @@ class lidar_dataset(torch.utils.data.Dataset):
 
         if time_check == True:
             assign_time = time.time()
-        
-        if ("train" in self.mode.lower()) and (self.anchor_box_function != None):
-            targets_dict = self.anchor_box_function.assign(
-                self.anchors,
-                self.anchors_dict,
-                gt_bbox,
-                anchors_mask,
-                gt_classes=gt_class,
-                gt_names=gt_name,
-                matched_thresholds=self.matched_thresholds,
-                unmatched_thresholds=self.unmatched_thresholds,
-                importance=gt_importance)
-        else:
-            targets_dict = None
 
         if time_check == True:
             show_time = "Time for assign box: {:.5f} s".format(time.time() - assign_time)
 
         points = points[:,:self.config["numb_input_feature"]]
-
-        if debugging == True:
-            print("Voxel shape:", voxels.shape)
             
-        if "train" in self.mode.lower():
+        # if "train" in self.mode.lower():
+        iou_mask = None
+        if ("train" in self.mode.lower()) and (self.used_iou_mask == True):
            now = time.time()
            
            total_length_x = int(((self.detection_range[3] - self.detection_range[0]) / self.voxel_size[0]) / self.out_size_factor)
@@ -949,11 +875,6 @@ class lidar_dataset(torch.utils.data.Dataset):
             gt_boxes = None
             gt_bbox = None
             gt_class = None
-            # sample["gt_bbox"] = None
-            # sample["gt_names"] = None
-            # sample["gt_boxes"] = None
-            # return sample
-        
 
         ######################
         # Debugging mode
@@ -971,8 +892,7 @@ class lidar_dataset(torch.utils.data.Dataset):
                 print("Total PED:", len(gt_name[gt_name=="PED"]))
                 print("Total CYC:", len(gt_name[gt_name=="CYC"]))
                 print("============")
-                detection_range = np.array([[0, 0, 0, 70.4, 80, 20, 0], [0, 0, 0, 70.4, 80, 20, 0]])
-                pointcloud, colors = debug_draw(points[:,:3], points[:, 2], 0, 1, gt_bbox, gt_name, detection_range)
+                pointcloud, colors = debug_draw(points[:,:3], points[:, 2], gt_bbox, gt_name)
                 if self.config.USING_MULTI_FRAME.IS_USED == True:
                     pointcloud, colors = add_show_future_position(pointcloud, colors, gt_bbox, future_position)
 
@@ -980,13 +900,46 @@ class lidar_dataset(torch.utils.data.Dataset):
                 v.attributes(colors / 255.)
                 v.set(point_size=0.01, phi=3.141, theta=0.785, lookat=[1, 0, 0])
                 print("<><><>")
+                bp()
 
         # if self.new_augments and "train" in self.mode.lower():
         #     pa_aug = PartAwareAugmentation(points, gt_bbox, gt_name, class_names=['CAR', 'PED', 'CYC'])
         #     points, gt_boxes_mask = pa_aug.augment(pa_aug_param="dropout_p02_swap_p02_mix_p02_sparse40_p01_noise10_p01")
         #     gt_bbox = gt_bbox[gt_boxes_mask]
 
+        voxels = self.voxelize(copy.copy(points))
+        
+        # bp()
+        if self.config.VOXEL_GENERATOR.IS_USED:
+           # bp()
+            maskmask = torch.zeros(400, 400)
+            list_mask = []
+            pc_th = torch.from_numpy(copy.copy(points)).float()
+            sparse_voxels, coordinates, num_points_per_voxel = self.sparse_gen(pc_th, empty_mean=False)
+            coordinates[:,1] += 1
+            coordinates[:,2] += 1
+            for i in range(coordinates.shape[0]):
+                yy = coordinates[i, 1]
+                xx = coordinates[i, 2]
+                yy = yy // 2
+                xx = xx // 2
+                if (yy<400) and (xx<400):
+                    if maskmask[yy,xx] == 0:
+                        list_mask.append([yy, xx])
+                        maskmask[yy, xx] = 1
+            list_mask = torch.tensor(list_mask).int()
+            # bp()
+            # print(len(sparse_voxels), " ", torch.sum(num_points_per_voxel > 199))
+            sample["list_mask"] = list_mask
+            # bp()
+            sample["sparse_voxels"] = sparse_voxels
+            sample["coordinates"] = coordinates.numpy()
+            sample["num_points"] = num_points_per_voxel.numpy()
+
         sample["path_lidar"] = lidar_path
+        # bp()
+        sample["voxels"] = voxels
+        # bp()
         
         if gt_name is not None:
             sample["gt_names"] = gt_name
@@ -997,7 +950,6 @@ class lidar_dataset(torch.utils.data.Dataset):
             sample["gt_bbox"] = gt_bbox
         else:
             sample["gt_bbox"] = np.zeros((0, 7), dtype=np.float32)
-
         if "train" in self.mode.lower():
             sample["iou_mask"] = iou_mask
 
@@ -1013,7 +965,7 @@ class lidar_dataset(torch.utils.data.Dataset):
             
         sample["points"] = points
         sample["show_points"] = points
-        
+        # bp()
         return sample
 
     def __len__(self):
