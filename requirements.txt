@@ -1,1 +1,4 @@
 termcorlor
+pdbpp
+matplotlib
+opencv-python
