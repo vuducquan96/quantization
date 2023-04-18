@@ -1,4 +1,3 @@
-import spconv
 import copy
 import time
 import torch
@@ -6,178 +5,15 @@ import numpy as np
 from torch import nn
 from numpy import log
 from pdb import set_trace as bp
-from core.models.registry import BBONES2D, HEAD, BBONES3D, MODELS
+from core.models.registry import HEAD, MODELS
 from configs.system_config import *
-from core import box_np_ops
 from core.gaussian import gaussian_radius, draw_heatmap_gaussian
-
-import torch
-import math
-import torch.nn as nn
-import torch.nn.functional as F
 from einops import rearrange
 from einops.layers.torch import Rearrange
-
-import torch
-import torch.nn as nn
-
 import torch
 from torch import nn
 from torch.nn import functional as F
-
-import pdb
-
-# ===================
-#     RGA Module
-# ===================
-
-class RGA_Module(nn.Module):
-	def __init__(self, in_channel, in_spatial, use_spatial=True, use_channel=True, \
-		cha_ratio=16, spa_ratio=16, down_ratio=16):
-		super(RGA_Module, self).__init__()
-
-		self.in_channel = in_channel
-		self.in_spatial = in_spatial
-		
-		self.use_spatial = use_spatial
-		self.use_channel = use_channel
-
-		print ('Use_Spatial_Att: {};\tUse_Channel_Att: {}.'.format(self.use_spatial, self.use_channel))
-
-		self.inter_channel = in_channel // cha_ratio
-		self.inter_spatial = in_spatial // spa_ratio
-		
-		# Embedding functions for original features
-		if self.use_spatial:
-			self.gx_spatial = nn.Sequential(
-				nn.Conv2d(in_channels=self.in_channel, out_channels=self.inter_channel,
-						kernel_size=1, stride=1, padding=0, bias=False),
-				nn.BatchNorm2d(self.inter_channel),
-				nn.ReLU()
-			)
-		if self.use_channel:
-			self.gx_channel = nn.Sequential(
-				nn.Conv2d(in_channels=self.in_spatial, out_channels=self.inter_spatial,
-						kernel_size=1, stride=1, padding=0, bias=False),
-				nn.BatchNorm2d(self.inter_spatial),
-				nn.ReLU()
-			)
-		
-		# Embedding functions for relation features
-		if self.use_spatial:
-			self.gg_spatial = nn.Sequential(
-				nn.Conv2d(in_channels=self.in_spatial * 2, out_channels=self.inter_spatial,
-						kernel_size=1, stride=1, padding=0, bias=False),
-				nn.BatchNorm2d(self.inter_spatial),
-				nn.ReLU()
-			)
-		if self.use_channel:
-			self.gg_channel = nn.Sequential(
-				nn.Conv2d(in_channels=self.in_channel*2, out_channels=self.inter_channel,
-						kernel_size=1, stride=1, padding=0, bias=False),
-				nn.BatchNorm2d(self.inter_channel),
-				nn.ReLU()
-			)
-		
-		# Networks for learning attention weights
-		if self.use_spatial:
-			num_channel_s = 1 + self.inter_spatial
-			self.W_spatial = nn.Sequential(
-				nn.Conv2d(in_channels=num_channel_s, out_channels=num_channel_s//down_ratio,
-						kernel_size=1, stride=1, padding=0, bias=False),
-				nn.BatchNorm2d(num_channel_s//down_ratio),
-				nn.ReLU(),
-				nn.Conv2d(in_channels=num_channel_s//down_ratio, out_channels=1,
-						kernel_size=1, stride=1, padding=0, bias=False),
-				nn.BatchNorm2d(1)
-			)
-		if self.use_channel:	
-			num_channel_c = 1 + self.inter_channel
-			self.W_channel = nn.Sequential(
-				nn.Conv2d(in_channels=num_channel_c, out_channels=num_channel_c//down_ratio,
-						kernel_size=1, stride=1, padding=0, bias=False),
-				nn.BatchNorm2d(num_channel_c//down_ratio),
-				nn.ReLU(),
-				nn.Conv2d(in_channels=num_channel_c//down_ratio, out_channels=1,
-						kernel_size=1, stride=1, padding=0, bias=False),
-				nn.BatchNorm2d(1)
-			)
-
-		# Embedding functions for modeling relations
-		if self.use_spatial:
-			self.theta_spatial = nn.Sequential(
-				nn.Conv2d(in_channels=self.in_channel, out_channels=self.inter_channel,
-								kernel_size=1, stride=1, padding=0, bias=False),
-				nn.BatchNorm2d(self.inter_channel),
-				nn.ReLU()
-			)
-			self.phi_spatial = nn.Sequential(
-				nn.Conv2d(in_channels=self.in_channel, out_channels=self.inter_channel,
-							kernel_size=1, stride=1, padding=0, bias=False),
-				nn.BatchNorm2d(self.inter_channel),
-				nn.ReLU()
-			)
-		if self.use_channel:
-			self.theta_channel = nn.Sequential(
-				nn.Conv2d(in_channels=self.in_spatial, out_channels=self.inter_spatial,
-								kernel_size=1, stride=1, padding=0, bias=False),
-				nn.BatchNorm2d(self.inter_spatial),
-				nn.ReLU()
-			)
-			self.phi_channel = nn.Sequential(
-				nn.Conv2d(in_channels=self.in_spatial, out_channels=self.inter_spatial,
-							kernel_size=1, stride=1, padding=0, bias=False),
-				nn.BatchNorm2d(self.inter_spatial),
-				nn.ReLU()
-			)
-				
-	def forward(self, x):
-		b, c, h, w = x.size()
-		
-		if self.use_spatial:
-			# spatial attention
-			theta_xs = self.theta_spatial(x)	
-			phi_xs = self.phi_spatial(x)
-			theta_xs = theta_xs.view(b, self.inter_channel, -1)
-			theta_xs = theta_xs.permute(0, 2, 1)
-			phi_xs = phi_xs.view(b, self.inter_channel, -1)
-			Gs = torch.matmul(theta_xs, phi_xs)
-			Gs_in = Gs.permute(0, 2, 1).view(b, h*w, h, w)
-			Gs_out = Gs.view(b, h*w, h, w)
-			Gs_joint = torch.cat((Gs_in, Gs_out), 1)
-			Gs_joint = self.gg_spatial(Gs_joint)
-		
-			g_xs = self.gx_spatial(x)
-			g_xs = torch.mean(g_xs, dim=1, keepdim=True)
-			ys = torch.cat((g_xs, Gs_joint), 1)
-
-			W_ys = self.W_spatial(ys)
-			if not self.use_channel:
-				out = F.sigmoid(W_ys.expand_as(x)) * x
-				return out
-			else:
-				x = F.sigmoid(W_ys.expand_as(x)) * x
-
-		if self.use_channel:
-			# channel attention
-			xc = x.view(b, c, -1).permute(0, 2, 1).unsqueeze(-1)
-			theta_xc = self.theta_channel(xc).squeeze(-1).permute(0, 2, 1)
-			phi_xc = self.phi_channel(xc).squeeze(-1)
-			Gc = torch.matmul(theta_xc, phi_xc)
-			Gc_in = Gc.permute(0, 2, 1).unsqueeze(-1)
-			Gc_out = Gc.unsqueeze(-1)
-			Gc_joint = torch.cat((Gc_in, Gc_out), 1)
-			Gc_joint = self.gg_channel(Gc_joint)
-
-			g_xc = self.gx_channel(xc)
-			g_xc = torch.mean(g_xc, dim=1, keepdim=True)
-			yc = torch.cat((g_xc, Gc_joint), 1)
-
-			W_yc = self.W_channel(yc).transpose(1, 2)
-			out = F.sigmoid(W_yc) * x
-
-			return out
-
+from core.ops.iou3d_nms import iou3d_nms_utils
 class BasicConv(nn.Module):
     def __init__(
         self,
@@ -240,8 +76,6 @@ class AttentionGate(nn.Module):
         x_out = self.conv(x_compress)
         scale = torch.sigmoid_(x_out)
         return x * scale
-
-
 class TripletAttention(nn.Module):
     def __init__(self, no_spatial=False):
         super(TripletAttention, self).__init__()
@@ -778,18 +612,6 @@ class DetectionHeader(nn.Module):
 
         return class_output, regression_output
 
-def rotate_nms_cc(dets, scores, thresh, nms_pre=None):
-    order = scores.argsort()[::-1].astype(np.int32)  # highest->lowest
-    dets_corners = box_np_ops.center_to_corner_box2d(dets[:, :2], dets[:, 2:4],
-                                                     dets[:, 4])
-
-    dets_standup = box_np_ops.corner_to_standup_nd(dets_corners)
-
-    standup_iou = box_np_ops.iou_jit(dets_standup, dets_standup, eps=0.0)
-    # print(dets_corners.shape, order.shape, standup_iou.shape)
-    return rotate_non_max_suppression_cpu(dets_corners, order, standup_iou,
-                                          thresh)
-
 def from_2d_box_to_3d(dd_box):
     ddd_box = torch.zeros((dd_box.shape[0], 7)).float()
     ddd_box[:,0] = dd_box[:, 0]
@@ -799,7 +621,6 @@ def from_2d_box_to_3d(dd_box):
     ddd_box[:,6] = dd_box[:, 4]
 
     return ddd_box
-
 def my_rotate_nms(box_preds_class, top_scores_class, top_labels_class, iou_thres):
     order = top_scores_class.sort(descending=True)[1]
     box_preds_class = box_preds_class[order]
@@ -841,7 +662,6 @@ class base2d(nn.Module):
 
         self.output_shape = [30, 800, 800]
 
-        # self.middle_layer = BBONES3D.get(config.MODEL.BBONES3D.name)(config.MODEL.num_input_features, self.output_shape) #TODO H: assign doesn't match with config
         self.num_classes = config["num_classes"]
 
         self.name_to_id = data_config["CLASS_ENCODE"]
@@ -876,81 +696,9 @@ class base2d(nn.Module):
         self.se4 = nn.Identity() 
 
         self.res_block_1 = ResidualBlock(n_input=32, n_output=96, n_res_units=3)
-        if self.attention == "se":
-            self.se1 = SELayer(96)
-
-        if self.attention == "cbam":
-            self.se1 = CBAM(96)
-
-        if self.attention == "rotate":
-            self.se1 = TripletAttention()
-        
-        if self.attention == "rga":
-            self.se1 = nn.Identity()
-
-        if self.attention == "":
-            self.se1 = nn.Identity()
-
         self.res_block_2 = ResidualBlock(n_input=96, n_output=196, n_res_units=6)
-        if self.attention == "se":
-            self.se2 = SELayer(196)
-
-        if self.attention == "cbam":
-            self.se2 = CBAM(196)
-        
-        if self.attention == "rotate":
-            self.se2 = TripletAttention()
-
-        if self.attention == "rga":
-            #self.se2 = RGA_Module(196, 200 * 200)
-            self.se2 = nn.Identity()
-
-        if self.attention == "":
-
-            self.se2 = nn.Identity()
-
         self.res_block_3 = ResidualBlock(n_input=196, n_output=256, n_res_units=6)
-        if self.attention == "se":
-            self.se3 = SELayer(256)
-
-        if self.attention == "cbam":
-            self.se3 = CBAM(256)
-
-        if self.attention == "rotate":
-            self.se3 = TripletAttention()
-        
-        if self.attention == "rga":
-            self.se3 = RGA_Module(256, 100* 100)
-            #self.se3 = nn.Identity()
-
-        if self.attention == "":
-            self.se3 = nn.Identity()
-        
-        # if self.attention == "coatnet":
-        #     self.se3 = nn.Identity()
-        #     self.res_block_3 = self._make_layer(block["T"],inp=196,oup=256, depth=2, image_size=(800//8, 800//8))
-
         self.res_block_4 = ResidualBlock(n_input=256, n_output=384, n_res_units=3)
-        if self.attention == "se":
-            self.se4 = SELayer(384)
-
-        if self.attention == "cbam":
-            self.se4 = CBAM(384)
-
-        if self.attention == "rotate":
-            self.se4 = TripletAttention()
-
-        if self.attention == "":
-            self.se4 = nn.Identity(
-            )
-            
-        if self.attention == "rga":
-            self.se4 = RGA_Module(384, 50 * 50)
-            #self.se4 = nn.Identity()
-        
-        if self.attention == "coatnet":
-            self.se4 = nn.Identity()
-            self.res_block_4 = self._make_layer(block["T"],inp=256,oup=384, depth=4, image_size=(800//16, 800//16))
         
 
         # FPN blocks
@@ -1012,21 +760,10 @@ class base2d(nn.Module):
         return feat
 
     def forward(self, data):
-        
-        batch_size = data["batch_size"]
 
-        if "voxel" in data:
-            voxel_features = data['voxel']
-        else:
-            voxel_features = torch.ones((len(data['coordinates']), 1)).float().cuda()
-            coors = data['coordinates']
-            coors = coors.int()
-            x = spconv.SparseConvTensor(voxel_features, coors, self.sparse_shape, batch_size)
-            voxel_features = x.dense().squeeze(1)
-
+        voxel_features = data['voxels']
         x_b = self.basis_block(voxel_features)
         x_1 = self.res_block_1(x_b)
-        #bp()
         x_1 = self.se1(x_1)
 
         x_2 = self.res_block_2(x_1)
@@ -1042,6 +779,7 @@ class base2d(nn.Module):
         spatial_features = self.fpn_block_2(x_34, x_2)
         
         pred = self.rpn1(spatial_features)
+
         if self.training == False:
             rr = self.predict1(data, pred)
             return rr
@@ -1055,7 +793,6 @@ class base2d(nn.Module):
         heatmap_ious_label = torch.zeros(cls_preds.shape).to(device)
 
         anno_box = torch.zeros((B, self.max_objs, 6)).to(device)
-        anno_box_xydxdy = torch.zeros((B, self.max_objs, 4)).to(device)
         index_matrix = torch.zeros((B, self.max_objs), dtype=torch.int64).to(device)
         masks_obj = torch.zeros((B, self.max_objs), dtype=torch.uint8).to(device)
         masks_class = torch.zeros((B, self.max_objs), dtype=torch.uint8).to(device)
@@ -1063,9 +800,7 @@ class base2d(nn.Module):
         total_length_x = int(((self.detection_range[3] - self.detection_range[0]) / self.voxel_size[0]) / self.out_size_factor)
         total_length_y = int(((self.detection_range[4] - self.detection_range[1]) / self.voxel_size[1]) / self.out_size_factor)
 
-        # print(">>>> Start <<<<")
         for batch_id in range(len(data["gt_boxes"])):
-            
             single_gt_box = data["gt_boxes"][batch_id, :, :]
             filter_gt = np.sum(single_gt_box, axis=1)
             single_gt_box = single_gt_box[filter_gt != 0]
@@ -1114,12 +849,6 @@ class base2d(nn.Module):
                     anno_box[batch_id, obj_id, 4] = torch.sin(2 * rot)
                     anno_box[batch_id, obj_id, 5] = torch.cos(2 * rot)
 
-
-                    #anno_box_xydxdy[batch_id, obj_id, 0] = bbox[0]
-                    #anno_box_xydxdy[batch_id, obj_id, 1] = bbox[1]
-
-                    #anno_box_xydxdy[batch_id, obj_id, 2] = bbox[3]
-                    #anno_box_xydxdy[batch_id, obj_id, 3] = bbox[4]
                     obj_id += 1
 
         box_preds = box_preds.view(box_preds.size(0), -1, box_preds.size(-1)).contiguous()
@@ -1141,137 +870,6 @@ class base2d(nn.Module):
         loss_dict["_iou_loss"] = 0
 
         return loss_dict
-
-
-    def predict(self, example, preds_dict):
-        batch_size = len(example[list(example)[0]])
-
-        batch_box_preds = preds_dict["box_preds"]
-   
-        batch_cls_preds = preds_dict["cls_preds"]
-
-        num_class_with_bg = self.num_classes
-
-        predictions_dicts = []
-
-        if time_check == True:
-            now_for = time.time()
-
-        nms_func = rotate_nms_gpu
-
-        device = batch_box_preds.get_device()
-        self.pre_define_vector = self.pre_define_vector.to(device)
-        idd = -1
-
-        for box_preds, cls_preds in zip(batch_box_preds, batch_cls_preds):
-            idd += 1
-            box_preds = box_preds.float()
-            box_preds[0, :, :, 0] += self.pre_define_vector[:, :, 0]
-            box_preds[0, :, :, 1] += self.pre_define_vector[:, :, 1]
-
-            box_preds[0, :, :, 0] = box_preds[0, :, :, 0] * self.out_size_factor * self.voxel_size[0] + \
-                                    self.detection_range[0]
-            box_preds[0, :, :, 1] = box_preds[0, :, :, 1] * self.out_size_factor * self.voxel_size[1] + \
-                                    self.detection_range[1]
-            box_preds[0, :, :, 2] = torch.exp(box_preds[0, :, :, 2])
-            box_preds[0, :, :, 3] = torch.exp(box_preds[0, :, :, 3])
-            box_preds[0, :, :, 4] = torch.atan2(box_preds[0, :, :, 4], box_preds[0, :, :, 5])/2
-            box_preds = box_preds[:, :, :, :-1]
-            box_preds = box_preds.view(-1, 5)
-            cls_preds = cls_preds.float()
-            cls_preds = cls_preds = cls_preds.view(-1, 3)
-            total_scores = torch.sigmoid(cls_preds)
-
-            if num_class_with_bg == 1:
-                top_scores = total_scores.squeeze(-1)
-                top_labels = torch.zeros(
-                    total_scores.shape[0],
-                    device=total_scores.device,
-                    dtype=torch.long)
-            else:
-                top_scores, top_labels = torch.max(total_scores, dim=-1)
-
-            nnn = time.time()
-            if self._nms_score_thresholds[0] > 0.0:
-                top_scores_keep = top_scores >= self._nms_score_thresholds[0]
-                top_scores = top_scores.masked_select(top_scores_keep)
-
-            if time_check == True:
-                print("threshold time:", time.time() - nnn)
-
-            if top_scores.shape[0] != 0:
-                box_preds = box_preds[top_scores_keep]
-                top_labels = top_labels[top_scores_keep]
-
-                boxes_for_nms = box_preds
-
-                selected = nms_func(
-                    boxes_for_nms,
-                    top_scores,
-                    pre_max_size=1200,
-                    post_max_size=120,
-                    iou_threshold=0.1,
-                )
-
-                if time_check == True:
-                    print("Time of roate nms gpu:", time.time() - now)
-            else:
-                selected = []
-
-            if selected is not None:
-                selected_boxes = box_preds[selected]
-                selected_labels = top_labels[selected]
-                selected_scores = top_scores[selected]
-            else:
-                selected_boxes, selected_labels, selected_scores = None, None, None
-
-            if selected_boxes.shape[0] != 0:
-                box_preds = selected_boxes
-                scores = selected_scores
-                label_preds = selected_labels
-                final_box_preds = box_preds
-                final_scores = scores
-
-                if "kernel" not in example:
-
-                    predictions_dict = {
-                        "box3d_lidar": final_box_preds,
-                        "scores": final_scores,
-                        "label_preds": label_preds,
-                    }
-                else:
-                    predictions_dict = {
-                        "box3d_lidar": final_box_preds,
-                        "scores": final_scores,
-                        "label_preds": label_preds,
-                        "predict_heatmap": batch_cls_preds[idd]
-                    }
-
-
-            else:
-                dtype = batch_box_preds.dtype
-                device = batch_box_preds.device
-                predictions_dict = {
-                    "box3d_lidar":
-                        torch.zeros([0, box_preds.shape[-1]],
-                                    dtype=dtype,
-                                    device=device),
-                    "scores":
-                        torch.zeros([0], dtype=dtype, device=device),
-                    "label_preds":
-                        torch.zeros([0], dtype=top_labels.dtype, device=device),
-                }
-                if "kernel" in example:
-                    predictions_dict = {
-                        "box3d_lidar": final_box_preds,
-                        "scores": final_scores,
-                        "label_preds": label_preds,
-                        "predict_heatmap": batch_cls_preds[idd]
-                    }
-            predictions_dicts.append(predictions_dict)
-
-        return predictions_dicts
-
     def predict1(self, example, preds_dict):
 
         batch_box_preds = preds_dict["box_preds"]
@@ -1280,7 +878,6 @@ class base2d(nn.Module):
 
         predictions_dicts = []
 
-        nms_func = rotate_nms_gpu
         idd = -1
         for box_preds, cls_preds in zip(batch_box_preds, batch_cls_preds):
             
@@ -1295,7 +892,7 @@ class base2d(nn.Module):
                                     self.detection_range[1]
             box_preds[0, :, :, 2] = torch.exp(box_preds[0, :, :, 2])
             box_preds[0, :, :, 3] = torch.exp(box_preds[0, :, :, 3])
-            box_preds[0, :, :, 4] = torch.atan2(box_preds[0, :, :, 4], box_preds[0, :, :, 5]) /2
+            box_preds[0, :, :, 4] = torch.atan2(box_preds[0, :, :, 4], box_preds[0, :, :, 5]) / 2.0
             
             box_preds = box_preds[:, :, :, :-1]
             box_preds = box_preds.view(-1, 5)
@@ -1342,11 +939,6 @@ class base2d(nn.Module):
                     top_scores_class = top_scores_class.masked_select(area_filter)
                     top_labels_class = top_labels_class.masked_select(area_filter)
 
-                    # area_filter_big = (box_preds_class[:,2] * box_preds_class[:,3]) > 10
-                    # area_filter_big = area_filter_big.float()
-                    # area_filter_big *= 0.1
-                    # top_scores_class = top_scores_class + area_filter_big
-
                 if classid == 2:
                     area_filter = (box_preds_class[:, 2] * box_preds_class[:, 3]) > 1
                     box_preds_class = box_preds_class[area_filter]
@@ -1354,28 +946,16 @@ class base2d(nn.Module):
                     top_labels_class = top_labels_class.masked_select(area_filter)
 
                 if box_preds_class.shape[0] != 0:
-                    selected = rotate_nms_cc(
-                        box_preds_class.float().cpu().numpy(),
-                        top_scores_class.float().cpu().numpy(),
-                        iou_thres
-                    )
+                    selected_boxes,  selected_top_scores_class, selected_top_labels_class = my_rotate_nms(box_preds_class,  top_scores_class, top_labels_class, iou_thres)
                 else:
+                    selected_boxes = torch.zeros((0,5)).cuda()
+                    selected_top_scores_class = torch.zeros(0).cuda()
+                    selected_top_labels_class = torch.zeros(0).cuda()
                     selected = []
-
-                if len(selected) > 0:
-                    selected_boxes = box_preds_class[selected]
-                    selected_top_scores_class = top_scores_class[selected]
-                    selected_top_labels_class = top_labels_class[selected]
-                else:
-                    selected_boxes = box_preds_class
-                    selected_top_scores_class = top_scores_class
-                    selected_top_labels_class = top_labels_class
 
                 all_box_prediction.append(selected_boxes)
                 all_score_prediction.append(selected_top_scores_class)
                 all_label_prediction.append(selected_top_labels_class)
-
-
 
             all_box_prediction = torch.cat(all_box_prediction, dim=0)
             all_score_prediction = torch.cat(all_score_prediction, dim=0)
