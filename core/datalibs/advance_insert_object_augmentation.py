@@ -13,11 +13,11 @@ from configs.system_config import *
 from core.ops.iou3d_nms import iou3d_nms_utils
 from core.tools.config_loader import config_loader
 from core.datalibs.box_utils import boxes_to_corners_3d
-from core.helpers.point_box_op import rotate_points, rotate_3dboxes
+from core.datalibs.point_box_op import rotate_points, rotate_3dboxes
 from core.datalibs.processor.point_feature_encoder import PointFeatureEncoder
 
 CFG = {
-    'no_point_collide_checked': 0.1,
+    'no_point_collide_checked': 0.05,
     'cut_out:': 0.4
 }
 
