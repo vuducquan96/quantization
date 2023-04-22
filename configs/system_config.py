@@ -1,6 +1,6 @@
 number_worker_per_gpu = 3
 sleeping_time = 0
-reset_cluster_database = False
+reset_cluster_database = True
 opt_level = 'O0'
 
 # Optimization level
