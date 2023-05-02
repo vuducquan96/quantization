@@ -1,0 +1,33 @@
+title = "seresnet_fpn"
+base = "seresnetfpn"
+experiment_name = "seresnet_fpn"
+num_classes=4
+
+# Activation function : relu, prelu, leakyrelu
+
+[MODEL]
+num_input_features = 3
+
+[TARGET_ASSIGNER]
+name = "center_head"
+    
+    [MODEL.HEAD]
+    name = "FastRPN"
+    num_class = 4
+    num_input_features=48
+
+[LOSS]
+    [LOSS.CLS_LOSS]
+    name = "GaussianFocalLoss"
+
+    [LOSS.REG_LOSS]
+    name = "L1Loss"
+
+[OPTIMIZER]
+name = "adamw"
+lr = 0.0015
+
+[SCHEDULER]
+name = "OneCycleLR"
+max_lr = 0.008
+num_epochs = 200
