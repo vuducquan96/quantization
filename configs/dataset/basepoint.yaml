@@ -1,0 +1,105 @@
+DATASET: "SeoulRobotics"
+root_list: ["/media/vuquan/data/dataset"]
+CLASS_NAMES: ['CAR', 'PED', 'CYC']
+DETECTION_CLASS: ['CAR', 'PED', 'CYC']
+
+POINT_CLOUD_RANGE: [-50.0, -50.0, -2.0, 50.0, 50.0, 4.0]
+
+POINT_FEATURE_ENCODING: {
+    encoding_type: absolute_coordinates_encoding,
+    used_feature_list: ['x', 'y', 'z'],
+    src_feature_list: ['x', 'y', 'z', 'intensity'],
+}
+
+USING_MULTI_FRAME: 
+  IS_USED: False
+  NUMBER_OF_FRAME: 8
+
+DATA_AUGMENTOR:
+    IS_USED: true
+    ROOT_PATH: 'data/waymo'
+    DISABLE_AUG_LIST: ['placeholder']
+
+    AUG_CONFIG_LIST:
+        - NAME: random_world_flip
+          ALONG_AXIS_LIST: ['x', 'y']
+
+        - NAME: random_world_rotation
+          WORLD_ROT_ANGLE: [-0.78539816, 0.78539816]
+          
+        - NAME: random_world_scaling
+          WORLD_SCALE_RANGE: [0.95, 1.05]
+
+TRAIN_DATA:
+    SINGLE_FRAME: ["2019-06-24_2k_frames/hesai64_5col/lidar/*",]
+                   
+    SEQUENCE_FRAME: {
+    }
+
+VAL_DATA:
+    SINGLE_FRAME: ["2019-06-24_2k_frames/hesai64_5col/lidar/*",]
+    SEQUENCE_FRAME: {
+    }
+
+CLUSTER_FOLDER: {
+    HESAI: "cluster_data/hesai64_5col"
+}
+
+FIX_POINT_SAMPLING:
+    IS_USED: False
+    MAXIMUM_POINT: 16384
+
+OBJ_INSERT_AUGMENT:
+    IS_USED: False
+    INSERT_CLASSES: ["BUS", "CAR", "PED", "CYC"]
+    MAX_NUM_INSERT: {
+        BUS: 1,
+        PED: 10,
+        CYC: 10,
+        CAR: 10
+    }
+
+    MIN_POINT_AUGMENT: {
+      BUS: 150,
+      PED: 100,
+      CYC: 100,
+      CAR: 100
+    }
+
+FEATURE_NORMAL: False
+
+VALIDATE:
+  POSITIVE_IOU_THRESH: 0.4
+  
+VOXEL_GENERATOR:
+    IS_USED: True
+    VOXEL_SIZE: [0.2, 0.2, 0.2]
+    RANGE: [-50.0, -50.0, -1.0, 50.0, 50.0, 3.0]
+    MAX_NUMBER_OF_POINTS_PER_VOXEL : 10
+    MAX_VOXELS: 40000
+
+CLASS_ENCODE: {
+    CAR: 0,
+    PED: 1,
+    CYC: 2
+}
+
+FALSE_SAMPLE: {
+      FOLDER_PATH: "false_sample",
+      MAX_SAMPLE: 50
+}
+
+MIN_POINTS_IN_BOX: {
+    CAR: 20,
+    CYC: 50,
+    PED: 50
+}
+
+NO_FILTER_GROUND_TRUTH: False
+
+out_size_factor : 8
+MAX_EPOCH: 120
+global_sampling_x: [-15, 15]
+global_sampling_y: [-15, 15]
+
+numb_input_feature: 3
