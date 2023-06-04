@@ -1,5 +1,5 @@
 DATASET: "SeoulRobotics"
-root_list: ["/mnt/share/Data"]
+root_list: ["/media/vuquan/data/dataset/"]
 CLASS_NAMES: ['CAR', 'PED', 'CYC']
 DETECTION_CLASS: ['CAR', 'PED', 'CYC']
 
@@ -16,7 +16,7 @@ USING_MULTI_FRAME:
   NUMBER_OF_FRAME: 8
 
 DATA_AUGMENTOR:
-    IS_USED: true
+    IS_USED: false
     ROOT_PATH: 'data/waymo'
     DISABLE_AUG_LIST: ['placeholder']
 
@@ -31,27 +31,20 @@ DATA_AUGMENTOR:
           WORLD_SCALE_RANGE: [0.95, 1.05]
 
 TRAIN_DATA:
-    SINGLE_FRAME: ["sr_data/2019-06-24_2k_frames/hesai64_5col/lidar/*",
-                   "sr_data/2019-06-24_2k_frames/hesai40_5col/lidar/*",
-                   "sr_data/2019-06-24_2k_frames/vld32_5col/lidar/*"]
+    SINGLE_FRAME: ["2019-06-24_2k_frames/hesai64_5col/lidar/*",
+                   "2019-06-24_2k_frames/hesai40_5col/lidar/*",
+                   "2019-06-24_2k_frames/vld32_5col/lidar/*"]
                    
     SEQUENCE_FRAME: {
-      WAYMO: {
-          DIR: "opensource_dataset/2019-09-03_waymo/",
-          STEP: 10,
-          SEQ: [0, 30],
-          MIN_ID: 0,
-          PRE_OBS: 0
-      }
     }
 
 VAL_DATA:
-    SINGLE_FRAME: ["sr_data/2019-06-24_2k_frames/hesai64_5col/lidar/*"]
+    SINGLE_FRAME: ["2019-06-24_2k_frames/hesai64_5col/lidar/*"]
     SEQUENCE_FRAME: {
     }
 
 CLUSTER_FOLDER: {
-    WAYMO: "temp/cluster_data/merge_output"
+    WAYMO: "cluster_data/lidar_4"
 }
 
 FIX_POINT_SAMPLING:
