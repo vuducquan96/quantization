@@ -8,3 +8,4 @@ playground/
 *.pth
 *.quant
 *.quant.pt
+*.so
